@@ -714,7 +714,7 @@ where
 	}
 }
 
-pub(crate) struct Ephemeral<'a, S: 'a + TrieBackendStorage<H>, H: 'a + Hasher> {
+pub struct Ephemeral<'a, S: 'a + TrieBackendStorage<H>, H: 'a + Hasher> {
 	storage: &'a S,
 	overlay: &'a mut PrefixedMemoryDB<H>,
 }

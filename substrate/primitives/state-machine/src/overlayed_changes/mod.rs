@@ -697,14 +697,14 @@ impl<H: Hasher> OverlayedChanges<H> {
 	// 		return (cache.transaction_storage_root, true)
 	// 	}
 
-	// 	let delta = self.top.changes_mut().map(|(k, v)| (&k[..], v.value().map(|v| &v[..])));
+		// let delta = self.top.changes_mut().map(|(k, v)| (&k[..], v.value().map(|v| &v[..])));
 
-	// 	let child_delta = self
-	// 		.children
-	// 		.values_mut()
-	// 		.map(|v| (&v.1, v.0.changes_mut().map(|(k, v)| (&k[..], v.value().map(|v| &v[..])))));
+		// let child_delta = self
+		// 	.children
+		// 	.values_mut()
+		// 	.map(|v| (&v.1, v.0.changes_mut().map(|(k, v)| (&k[..], v.value().map(|v| &v[..])))));
 
-	// 	let (root, transaction) = backend.full_storage_root(delta, child_delta, state_version);
+		// let (root, transaction) = backend.full_storage_root(delta, child_delta, state_version);
 
 	// 	self.storage_transaction_cache =
 	// 		Some(StorageTransactionCache { transaction, transaction_storage_root: root });
@@ -724,9 +724,11 @@ impl<H: Hasher> OverlayedChanges<H> {
 			return (cache.transaction_storage_root, true)
 		}
 
+		let mut no_committed_change = true;
 		let top_dirty_keys = {
 			let dk = self.top_root_cache.take_change();
 			if !dk.is_empty() {
+				no_committed_change = false;
 				dk
 			} else {
 				self.top.dirty_keys.last().unwrap_or(&Set::new()).clone()
@@ -743,6 +745,7 @@ impl<H: Hasher> OverlayedChanges<H> {
 				let child_dirty_keys = {
 					let dk = root_cache.take_change();
 					if !dk.is_empty() {
+						no_committed_change = false;
 						dk
 					} else {
 						overlay_changes.dirty_keys.last().unwrap_or(&Set::new()).clone()
@@ -760,7 +763,17 @@ impl<H: Hasher> OverlayedChanges<H> {
 				(&**info, &mut **cache, delta)
 			});
 
-		let (root, transaction) = backend.cached_full_storage_root((top_root_cache, delta), child_delta, state_version);
+		let (root, transaction) = if no_committed_change {
+			let delta = self.top.changes_mut().map(|(k, v)| (&k[..], v.value().map(|v| &v[..])));
+			let child_delta = self
+				.children
+				.values_mut()
+				.map(|v| (&v.1, v.0.changes_mut().map(|(k, v)| (&k[..], v.value().map(|v| &v[..])))));
+	
+			backend.full_storage_root(delta, child_delta, state_version)
+		} else {
+			backend.cached_full_storage_root((top_root_cache, delta), child_delta, state_version)
+		};
 
 		self.storage_transaction_cache =
 			Some(StorageTransactionCache { transaction, transaction_storage_root: root });

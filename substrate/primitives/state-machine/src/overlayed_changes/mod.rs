@@ -724,7 +724,15 @@ impl<H: Hasher> OverlayedChanges<H> {
 			return (cache.transaction_storage_root, true)
 		}
 
-		let _delta: Vec<_> = self.top_root_cache.take_change().into_iter().filter_map(|k| self.top.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
+		let top_dirty_keys = {
+			let dk = self.top_root_cache.take_change();
+			if !dk.is_empty() {
+				dk
+			} else {
+				self.top.dirty_keys.last().unwrap_or(&Set::new()).clone()
+			}
+		};
+		let _delta: Vec<_> = top_dirty_keys.into_iter().filter_map(|k| self.top.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
 		let delta = _delta.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])));
 		let top_root_cache = &mut self.top_root_cache.write_overlay;
 
@@ -732,8 +740,15 @@ impl<H: Hasher> OverlayedChanges<H> {
 			.children
 			.values_mut()
 			.map(|(overlay_changes, info, root_cache)| {
-				let dirty_keys = root_cache.take_change();
-				let delta: Vec<_> = dirty_keys.into_iter().filter_map(|k| overlay_changes.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
+				let child_dirty_keys = {
+					let dk = root_cache.take_change();
+					if !dk.is_empty() {
+						dk
+					} else {
+						overlay_changes.dirty_keys.last().unwrap_or(&Set::new()).clone()
+					}
+				};
+				let delta: Vec<_> = child_dirty_keys.into_iter().filter_map(|k| overlay_changes.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
 				(info, &mut root_cache.write_overlay, delta)
 			})
 			.collect();

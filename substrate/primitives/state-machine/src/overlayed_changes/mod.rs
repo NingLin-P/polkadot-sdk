@@ -720,10 +720,9 @@ impl<H: Hasher> OverlayedChanges<H> {
 	where
 		H::Out: Ord + Encode,
 	{
-		// FIXME:
-		// if let Some(cache) = &self.storage_transaction_cache {
-		// 	return (cache.transaction_storage_root, true)
-		// }
+		if let Some(cache) = &self.storage_transaction_cache {
+			return (cache.transaction_storage_root, true)
+		}
 
 		let _delta: Vec<_> = self.top_root_cache.take_change().into_iter().filter_map(|k| self.top.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
 		let delta = _delta.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])));
@@ -746,10 +745,10 @@ impl<H: Hasher> OverlayedChanges<H> {
 				(&**info, &mut **cache, delta)
 			});
 
-		let root = backend.cached_full_storage_root((top_root_cache, delta), child_delta, state_version);
+		let (root, transaction) = backend.cached_full_storage_root((top_root_cache, delta), child_delta, state_version);
 
-		// self.storage_transaction_cache =
-		// 	Some(StorageTransactionCache { transaction, transaction_storage_root: root });
+		self.storage_transaction_cache =
+			Some(StorageTransactionCache { transaction, transaction_storage_root: root });
 
 		(root, false)
 	}

@@ -358,17 +358,19 @@ pub trait Backend<H: Hasher>: core::fmt::Debug {
 			Item = (&'a ChildInfo, &'a mut PrefixedMemoryDB<H>, impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>),
 		>,
 		state_version: StateVersion,
-	) -> H::Out
+	) -> (H::Out, BackendTransaction<H>)
 	where
 		H: 'a,
 		H::Out: Ord + Encode,
 	{
+		let mut txs = BackendTransaction::default();
 		let mut child_roots: Vec<_> = Default::default();
 		// child first
 		for (child_info, write_overlay, child_delta) in child_deltas {
 			let (child_root, empty) =
 				self.cached_child_storage_root(child_info, child_delta, write_overlay, state_version);
 			let prefixed_storage_key = child_info.prefixed_storage_key();
+			txs.consolidate(write_overlay.clone());
 			if empty {
 				child_roots.push((prefixed_storage_key.into_inner(), None));
 			} else {
@@ -383,8 +385,9 @@ pub trait Backend<H: Hasher>: core::fmt::Debug {
 			write_overlay,
 			state_version,
 		);
+		txs.consolidate(write_overlay.clone());
 
-		root
+		(root, txs)
 	}
 
 	/// Register stats from overlay of state machine.

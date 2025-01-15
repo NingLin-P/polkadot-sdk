@@ -632,11 +632,21 @@ where
 		state_version: StateVersion,
 	) -> (H::Out, PrefixedMemoryDB<H>) {
 		let mut write_overlay = PrefixedMemoryDB::default();
+		let root = self.cached_storage_root(delta, &mut write_overlay, state_version);
+		(root, write_overlay)
+	}
 
+	pub fn cached_storage_root<'a>(
+		&self,
+		delta: impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>,
+		write_overlay: &mut PrefixedMemoryDB<H>,
+		state_version: StateVersion,
+	) -> H::Out {
 		let root = self.with_recorder_and_cache_for_storage_root(None, |recorder, cache| {
-			let mut eph = Ephemeral::new(self.backend_storage(), &mut write_overlay);
+			let mut eph = Ephemeral::new(self.backend_storage(), write_overlay);
 			let res = match state_version {
 				StateVersion::V0 => delta_trie_root::<sp_trie::LayoutV0<H>, _, _, _, _, _>(
+					// FIXME: parent root
 					&mut eph, self.root, delta, recorder, cache,
 				),
 				StateVersion::V1 => delta_trie_root::<sp_trie::LayoutV1<H>, _, _, _, _, _>(
@@ -652,8 +662,7 @@ where
 				},
 			}
 		});
-
-		(root, write_overlay)
+		root
 	}
 
 	/// Returns the child storage root for the child trie `child_info` after applying the given
@@ -664,10 +673,21 @@ where
 		delta: impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>,
 		state_version: StateVersion,
 	) -> (H::Out, bool, PrefixedMemoryDB<H>) {
+		let mut write_overlay = PrefixedMemoryDB::default();
+		let (new_child_root, is_default) = self.cached_child_storage_root(child_info, delta, &mut write_overlay, state_version);
+		(new_child_root, is_default, write_overlay)
+	}
+
+	pub fn cached_child_storage_root<'a>(
+		&self,
+		child_info: &ChildInfo,
+		delta: impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>,
+		write_overlay: &mut PrefixedMemoryDB<H>,
+		state_version: StateVersion,
+	) -> (H::Out, bool) {
 		let default_root = match child_info.child_type() {
 			ChildType::ParentKeyId => empty_child_trie_root::<sp_trie::LayoutV1<H>>(),
 		};
-		let mut write_overlay = PrefixedMemoryDB::default();
 		let child_root = match self.child_root(child_info) {
 			Ok(Some(hash)) => hash,
 			Ok(None) => default_root,
@@ -679,7 +699,7 @@ where
 
 		let new_child_root =
 			self.with_recorder_and_cache_for_storage_root(Some(child_root), |recorder, cache| {
-				let mut eph = Ephemeral::new(self.backend_storage(), &mut write_overlay);
+				let mut eph = Ephemeral::new(self.backend_storage(), write_overlay);
 				match match state_version {
 					StateVersion::V0 =>
 						child_delta_trie_root::<sp_trie::LayoutV0<H>, _, _, _, _, _, _>(
@@ -710,7 +730,7 @@ where
 
 		let is_default = new_child_root == default_root;
 
-		(new_child_root, is_default, write_overlay)
+		(new_child_root, is_default)
 	}
 }
 

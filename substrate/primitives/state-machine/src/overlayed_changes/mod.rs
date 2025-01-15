@@ -30,9 +30,13 @@ use sp_core::{
 	offchain::OffchainOverlayedChange,
 	storage::{well_known_keys::EXTRINSIC_INDEX, ChildInfo, StateVersion},
 };
+#[cfg(not(feature = "std"))]
+use alloc::collections::btree_set::BTreeSet as Set;
+#[cfg(feature = "std")]
+use std::collections::HashSet as Set;
 #[cfg(feature = "std")]
 use sp_externalities::{Extension, Extensions};
-use sp_trie::{empty_child_trie_root, LayoutV1};
+use sp_trie::{empty_child_trie_root, LayoutV1, PrefixedMemoryDB};
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::btree_map::BTreeMap as Map;
@@ -88,14 +92,50 @@ impl Extrinsics {
 	}
 }
 
+pub struct StorageRootCache<H: Hasher> {
+	write_overlay: PrefixedMemoryDB<H>,
+	dirty_keys: Set<StorageKey>,
+}
+
+impl<H: Hasher> Default for StorageRootCache<H> {
+	fn default() -> Self {
+		Self {
+			write_overlay: PrefixedMemoryDB::default(),
+			dirty_keys: Set::new(),
+		}
+	}
+}
+
+impl<H: Hasher> Clone for StorageRootCache<H> {
+	fn clone(&self) -> Self {
+		Self {
+			write_overlay: self.write_overlay.clone(),
+			dirty_keys: self.dirty_keys.clone(),
+		}
+	}
+}
+
+impl<H: Hasher> StorageRootCache<H> {
+	fn merge_change(&mut self, other: &Set<StorageKey>) {
+		for k in other {
+			self.dirty_keys.insert(k.clone());
+		}
+	}
+
+	fn take_change(&mut self) -> Set<StorageKey> {
+		core::mem::take(&mut self.dirty_keys)
+	}
+}
+
 /// The set of changes that are overlaid onto the backend.
 ///
 /// It allows changes to be modified using nestable transactions.
 pub struct OverlayedChanges<H: Hasher> {
 	/// Top level storage changes.
 	top: OverlayedChangeSet,
+	top_root_cache: StorageRootCache<H>,
 	/// Child storage changes. The map key is the child storage key without the common prefix.
-	children: Map<StorageKey, (OverlayedChangeSet, ChildInfo)>,
+	children: Map<StorageKey, (OverlayedChangeSet, ChildInfo, StorageRootCache<H>)>,
 	/// Offchain related changes.
 	offchain: OffchainOverlayedChanges,
 	/// Transaction index changes,
@@ -114,6 +154,7 @@ impl<H: Hasher> Default for OverlayedChanges<H> {
 	fn default() -> Self {
 		Self {
 			top: Default::default(),
+			top_root_cache: Default::default(),
 			children: Default::default(),
 			offchain: Default::default(),
 			transaction_index_ops: Default::default(),
@@ -128,6 +169,7 @@ impl<H: Hasher> Clone for OverlayedChanges<H> {
 	fn clone(&self) -> Self {
 		Self {
 			top: self.top.clone(),
+			top_root_cache: self.top_root_cache.clone(),
 			children: self.children.clone(),
 			offchain: self.offchain.clone(),
 			transaction_index_ops: self.transaction_index_ops.clone(),
@@ -142,7 +184,7 @@ impl<H: Hasher> core::fmt::Debug for OverlayedChanges<H> {
 	fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
 		f.debug_struct("OverlayedChanges")
 			.field("top", &self.top)
-			.field("children", &self.children)
+			// .field("children", &self.children)
 			.field("offchain", &self.offchain)
 			.field("transaction_index_ops", &self.transaction_index_ops)
 			.field("collect_extrinsics", &self.collect_extrinsics)
@@ -358,10 +400,9 @@ impl<H: Hasher> OverlayedChanges<H> {
 		self.stats.tally_write_overlay(size_write);
 		let storage_key = child_info.storage_key().to_vec();
 		let top = &self.top;
-		let (changeset, info) = self
-			.children
-			.entry(storage_key)
-			.or_insert_with(|| (top.spawn_child(), child_info.clone()));
+		let (changeset, info, _) = self.children.entry(storage_key).or_insert_with(|| {
+			(top.spawn_child(), child_info.clone(), StorageRootCache::default())
+		});
 		let updatable = info.try_update(child_info);
 		debug_assert!(updatable);
 		changeset.set(key, val, extrinsic_index);
@@ -376,10 +417,9 @@ impl<H: Hasher> OverlayedChanges<H> {
 		let extrinsic_index = self.extrinsic_index();
 		let storage_key = child_info.storage_key().to_vec();
 		let top = &self.top;
-		let (changeset, info) = self
-			.children
-			.entry(storage_key)
-			.or_insert_with(|| (top.spawn_child(), child_info.clone()));
+		let (changeset, info, _) = self.children.entry(storage_key).or_insert_with(|| {
+			(top.spawn_child(), child_info.clone(), StorageRootCache::default())
+		});
 		let updatable = info.try_update(child_info);
 		debug_assert!(updatable);
 		changeset.clear_where(|_, _| true, extrinsic_index)
@@ -404,10 +444,9 @@ impl<H: Hasher> OverlayedChanges<H> {
 		let extrinsic_index = self.extrinsic_index();
 		let storage_key = child_info.storage_key().to_vec();
 		let top = &self.top;
-		let (changeset, info) = self
-			.children
-			.entry(storage_key)
-			.or_insert_with(|| (top.spawn_child(), child_info.clone()));
+		let (changeset, info, _) = self.children.entry(storage_key).or_insert_with(|| {
+			(top.spawn_child(), child_info.clone(), StorageRootCache::default())
+		});
 		let updatable = info.try_update(child_info);
 		debug_assert!(updatable);
 		changeset.clear_where(|key, _| key.starts_with(prefix), extrinsic_index)
@@ -431,7 +470,7 @@ impl<H: Hasher> OverlayedChanges<H> {
 	/// Changes made without any open transaction are committed immediately.
 	pub fn start_transaction(&mut self) {
 		self.top.start_transaction();
-		for (_, (changeset, _)) in self.children.iter_mut() {
+		for (_, (changeset, _, _)) in self.children.iter_mut() {
 			changeset.start_transaction();
 		}
 		self.offchain.overlay_mut().start_transaction();
@@ -445,7 +484,7 @@ impl<H: Hasher> OverlayedChanges<H> {
 		self.mark_dirty();
 
 		self.top.rollback_transaction()?;
-		retain_map(&mut self.children, |_, (changeset, _)| {
+		retain_map(&mut self.children, |_, (changeset, _, _)| {
 			changeset
 				.rollback_transaction()
 				.expect("Top and children changesets are started in lockstep; qed");
@@ -463,8 +502,12 @@ impl<H: Hasher> OverlayedChanges<H> {
 	/// Any changes made during that transaction are committed. Returns an error if there
 	/// is no open transaction that can be committed.
 	pub fn commit_transaction(&mut self) -> Result<(), NoOpenTransaction> {
+		self.top_root_cache.merge_change(self.top.dirty_keys.last().ok_or(NoOpenTransaction)?);
 		self.top.commit_transaction()?;
-		for (_, (changeset, _)) in self.children.iter_mut() {
+
+		for (_, (changeset, _, root_cache)) in self.children.iter_mut() {
+
+			root_cache.merge_change(changeset.dirty_keys.last().ok_or(NoOpenTransaction)?);
 			changeset
 				.commit_transaction()
 				.expect("Top and children changesets are started in lockstep; qed");
@@ -482,7 +525,7 @@ impl<H: Hasher> OverlayedChanges<H> {
 	/// Calling this while already inside the runtime will return an error.
 	pub fn enter_runtime(&mut self) -> Result<(), AlreadyInRuntime> {
 		self.top.enter_runtime()?;
-		for (_, (changeset, _)) in self.children.iter_mut() {
+		for (_, (changeset, _, _)) in self.children.iter_mut() {
 			changeset
 				.enter_runtime()
 				.expect("Top and children changesets are entering runtime in lockstep; qed")
@@ -500,7 +543,7 @@ impl<H: Hasher> OverlayedChanges<H> {
 	/// Calling this while outside the runtime will return an error.
 	pub fn exit_runtime(&mut self) -> Result<(), NotInRuntime> {
 		self.top.exit_runtime()?;
-		for (_, (changeset, _)) in self.children.iter_mut() {
+		for (_, (changeset, _, _)) in self.children.iter_mut() {
 			changeset
 				.exit_runtime()
 				.expect("Top and children changesets are entering runtime in lockstep; qed");
@@ -554,7 +597,7 @@ impl<H: Hasher> OverlayedChanges<H> {
 		&self,
 		key: &[u8],
 	) -> Option<(impl Iterator<Item = (&StorageKey, &OverlayedValue)>, &ChildInfo)> {
-		self.children.get(key).map(|(overlay, info)| (overlay.changes(), info))
+		self.children.get(key).map(|(overlay, info, _)| (overlay.changes(), info))
 	}
 
 	/// Get an optional iterator over all child changes stored under the supplied key.
@@ -564,7 +607,7 @@ impl<H: Hasher> OverlayedChanges<H> {
 	) -> Option<(impl Iterator<Item = (&StorageKey, &mut OverlayedValue)>, &ChildInfo)> {
 		self.children
 			.get_mut(key)
-			.map(|(overlay, info)| (overlay.changes_mut(), &*info))
+			.map(|(overlay, info, _)| (overlay.changes_mut(), &*info))
 	}
 
 	/// Get an list of all index operations.
@@ -597,7 +640,7 @@ impl<H: Hasher> OverlayedChanges<H> {
 		let main_storage_changes =
 			take(&mut self.top).drain_committed().map(|(k, v)| (k, v.to_option()));
 		let child_storage_changes =
-			take(&mut self.children).into_iter().map(|(key, (val, info))| {
+			take(&mut self.children).into_iter().map(|(key, (val, info, _))| {
 				(key, (val.drain_committed().map(|(k, v)| (k, v.to_option())), info))
 			});
 		let offchain_storage_changes = self.offchain_drain_committed().collect();
@@ -642,6 +685,33 @@ impl<H: Hasher> OverlayedChanges<H> {
 	/// as seen by the current transaction.
 	///
 	/// Returns the storage root and whether it was already cached.
+	// pub fn storage_root<B: Backend<H>>(
+	// 	&mut self,
+	// 	backend: &B,
+	// 	state_version: StateVersion,
+	// ) -> (H::Out, bool)
+	// where
+	// 	H::Out: Ord + Encode,
+	// {
+	// 	if let Some(cache) = &self.storage_transaction_cache {
+	// 		return (cache.transaction_storage_root, true)
+	// 	}
+
+	// 	let delta = self.top.changes_mut().map(|(k, v)| (&k[..], v.value().map(|v| &v[..])));
+
+	// 	let child_delta = self
+	// 		.children
+	// 		.values_mut()
+	// 		.map(|v| (&v.1, v.0.changes_mut().map(|(k, v)| (&k[..], v.value().map(|v| &v[..])))));
+
+	// 	let (root, transaction) = backend.full_storage_root(delta, child_delta, state_version);
+
+	// 	self.storage_transaction_cache =
+	// 		Some(StorageTransactionCache { transaction, transaction_storage_root: root });
+
+	// 	(root, false)
+	// }
+
 	pub fn storage_root<B: Backend<H>>(
 		&mut self,
 		backend: &B,
@@ -650,21 +720,36 @@ impl<H: Hasher> OverlayedChanges<H> {
 	where
 		H::Out: Ord + Encode,
 	{
-		if let Some(cache) = &self.storage_transaction_cache {
-			return (cache.transaction_storage_root, true)
-		}
+		// FIXME:
+		// if let Some(cache) = &self.storage_transaction_cache {
+		// 	return (cache.transaction_storage_root, true)
+		// }
 
-		let delta = self.top.changes_mut().map(|(k, v)| (&k[..], v.value().map(|v| &v[..])));
+		let _delta: Vec<_> = self.top_root_cache.take_change().into_iter().filter_map(|k| self.top.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
+		let delta = _delta.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])));
+		let top_root_cache = &mut self.top_root_cache.write_overlay;
 
-		let child_delta = self
+		let mut _child_delta: Vec<_> = self
 			.children
 			.values_mut()
-			.map(|v| (&v.1, v.0.changes_mut().map(|(k, v)| (&k[..], v.value().map(|v| &v[..])))));
+			.map(|(overlay_changes, info, root_cache)| {
+				let dirty_keys = root_cache.take_change();
+				let delta: Vec<_> = dirty_keys.into_iter().filter_map(|k| overlay_changes.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
+				(info, &mut root_cache.write_overlay, delta)
+			})
+			.collect();
 
-		let (root, transaction) = backend.full_storage_root(delta, child_delta, state_version);
+		let child_delta = _child_delta
+			.iter_mut()
+			.map(|(info, cache, delta1)| {
+				let delta = delta1.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])));
+				(&**info, &mut **cache, delta)
+			});
 
-		self.storage_transaction_cache =
-			Some(StorageTransactionCache { transaction, transaction_storage_root: root });
+		let root = backend.cached_full_storage_root((top_root_cache, delta), child_delta, state_version);
+
+		// self.storage_transaction_cache =
+		// 	Some(StorageTransactionCache { transaction, transaction_storage_root: root });
 
 		(root, false)
 	}
@@ -696,7 +781,7 @@ impl<H: Hasher> OverlayedChanges<H> {
 				// V1 is equivalent to V0 on empty root.
 				.unwrap_or_else(empty_child_trie_root::<LayoutV1<H>>);
 
-			return Ok((root, true))
+			return Ok((root, true));
 		}
 
 		let root = if let Some((changes, info)) = self.child_changes_mut(storage_key) {
@@ -746,7 +831,7 @@ impl<H: Hasher> OverlayedChanges<H> {
 	) -> impl Iterator<Item = (&[u8], &mut OverlayedValue)> {
 		self.children
 			.get_mut(storage_key)
-			.map(|(overlay, _)| overlay.changes_after(key))
+			.map(|(overlay, _, _)| overlay.changes_after(key))
 			.into_iter()
 			.flatten()
 	}
@@ -779,7 +864,7 @@ impl<H: Hasher> From<sp_core::storage::Storage> for OverlayedChanges<H> {
 			children: storage
 				.children_default
 				.into_iter()
-				.map(|(k, v)| (k, (v.data.into(), v.child_info)))
+				.map(|(k, v)| (k, (v.data.into(), v.child_info, StorageRootCache::default())))
 				.collect(),
 			..Default::default()
 		}

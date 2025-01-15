@@ -266,6 +266,31 @@ pub trait Backend<H: Hasher>: core::fmt::Debug {
 	where
 		H::Out: Ord;
 
+	/// Calculate the storage root, with given delta over what is already stored in
+	/// the backend, and produce a "transaction" that can be used to commit.
+	/// Does not include child storage updates.
+	fn cached_storage_root<'a>(
+		&self,
+		delta: impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>,
+		write_overlay: &mut PrefixedMemoryDB<H>,
+		state_version: StateVersion,
+	) -> H::Out
+	where
+		H::Out: Ord;
+
+	/// Calculate the child storage root, with given delta over what is already stored in
+	/// the backend, and produce a "transaction" that can be used to commit. The second argument
+	/// is true if child storage root equals default storage root.
+	fn cached_child_storage_root<'a>(
+		&self,
+		child_info: &ChildInfo,
+		delta: impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>,
+		write_overlay: &mut PrefixedMemoryDB<H>,
+		state_version: StateVersion,
+	) -> (H::Out, bool)
+	where
+		H::Out: Ord;
+
 	/// Returns a lifetimeless raw storage iterator.
 	fn raw_iter(&self, args: IterArgs) -> Result<Self::RawIter, Self::Error>;
 
@@ -324,6 +349,42 @@ pub trait Backend<H: Hasher>: core::fmt::Debug {
 		txs.consolidate(parent_txs);
 
 		(root, txs)
+	}
+
+	fn cached_full_storage_root<'a>(
+		&self,
+		delta: (&mut PrefixedMemoryDB<H>, impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>),
+		child_deltas: impl Iterator<
+			Item = (&'a ChildInfo, &'a mut PrefixedMemoryDB<H>, impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>),
+		>,
+		state_version: StateVersion,
+	) -> H::Out
+	where
+		H: 'a,
+		H::Out: Ord + Encode,
+	{
+		let mut child_roots: Vec<_> = Default::default();
+		// child first
+		for (child_info, write_overlay, child_delta) in child_deltas {
+			let (child_root, empty) =
+				self.cached_child_storage_root(child_info, child_delta, write_overlay, state_version);
+			let prefixed_storage_key = child_info.prefixed_storage_key();
+			if empty {
+				child_roots.push((prefixed_storage_key.into_inner(), None));
+			} else {
+				child_roots.push((prefixed_storage_key.into_inner(), Some(child_root.encode())));
+			}
+		}
+		let (write_overlay, delta) = delta;
+		let root = self.cached_storage_root(
+			delta
+				.map(|(k, v)| (k, v.as_ref().map(|v| &v[..])))
+				.chain(child_roots.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])))),
+			write_overlay,
+			state_version,
+		);
+
+		root
 	}
 
 	/// Register stats from overlay of state machine.

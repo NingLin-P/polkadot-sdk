@@ -186,11 +186,11 @@ pub type OverlayedChangeSet = OverlayedMap<StorageKey, StorageEntry>;
 #[derive(Debug, Clone)]
 pub struct OverlayedMap<K, V> {
 	/// Stores the changes that this overlay constitutes.
-	changes: BTreeMap<K, OverlayedEntry<V>>,
+	pub(crate) changes: BTreeMap<K, OverlayedEntry<V>>,
 	/// Stores which keys are dirty per transaction. Needed in order to determine which
 	/// values to merge into the parent transaction on commit. The length of this vector
 	/// therefore determines how many nested transactions are currently open (depth).
-	dirty_keys: DirtyKeysSets<K>,
+	pub(crate) dirty_keys: DirtyKeysSets<K>,
 	/// The number of how many transactions beginning from the first transactions are started
 	/// by the client. Those transactions are protected against close (commit, rollback)
 	/// when in runtime mode.

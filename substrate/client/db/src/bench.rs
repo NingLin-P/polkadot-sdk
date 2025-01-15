@@ -35,6 +35,7 @@ use sp_state_machine::{
 use sp_trie::{
 	cache::{CacheSize, SharedTrieCache},
 	prefixed_key, MemoryDB, MerkleValue,
+	PrefixedMemoryDB,
 };
 use std::{
 	cell::{Cell, RefCell},
@@ -462,6 +463,31 @@ impl<Hasher: Hash> StateBackend<Hasher> for BenchmarkingState<Hasher> {
 			.borrow()
 			.as_ref()
 			.map_or(Default::default(), |s| s.child_storage_root(child_info, delta, state_version))
+	}
+
+	fn cached_storage_root<'a>(
+		&self,
+		delta: impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>,
+		write_overlay: &mut PrefixedMemoryDB<Hasher>,
+		state_version: StateVersion,
+	) -> Hasher::Output {
+		self.state
+			.borrow()
+			.as_ref()
+			.map_or(Default::default(), |s| s.cached_storage_root(delta, write_overlay, state_version))
+	}
+
+	fn cached_child_storage_root<'a>(
+		&self,
+		child_info: &ChildInfo,
+		delta: impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>,
+		write_overlay: &mut PrefixedMemoryDB<Hasher>,
+		state_version: StateVersion,
+	) -> (Hasher::Output, bool) {
+		self.state
+			.borrow()
+			.as_ref()
+			.map_or(Default::default(), |s| s.cached_child_storage_root(child_info, delta, write_overlay, state_version))
 	}
 
 	fn raw_iter(&self, args: IterArgs) -> Result<Self::RawIter, Self::Error> {

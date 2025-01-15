@@ -28,7 +28,7 @@ use sp_state_machine::{
 	backend::{AsTrieBackend, Backend as StateBackend},
 	BackendTransaction, IterArgs, StorageIterator, StorageKey, StorageValue, TrieBackend,
 };
-use sp_trie::MerkleValue;
+use sp_trie::{PrefixedMemoryDB, MerkleValue};
 use std::sync::Arc;
 
 /// State abstraction for recording stats about state access.
@@ -199,6 +199,25 @@ impl<S: StateBackend<HashingFor<B>>, B: BlockT> StateBackend<HashingFor<B>>
 		state_version: StateVersion,
 	) -> (B::Hash, bool, BackendTransaction<HashingFor<B>>) {
 		self.state.child_storage_root(child_info, delta, state_version)
+	}
+
+	fn cached_storage_root<'a>(
+		&self,
+		delta: impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>,
+		write_overlay: &mut PrefixedMemoryDB<HashingFor<B>>,
+		state_version: StateVersion,
+	) -> B::Hash {
+		self.state.cached_storage_root(delta, write_overlay, state_version)
+	}
+
+	fn cached_child_storage_root<'a>(
+		&self,
+		child_info: &ChildInfo,
+		delta: impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>,
+		write_overlay: &mut PrefixedMemoryDB<HashingFor<B>>,
+		state_version: StateVersion,
+	) -> (B::Hash, bool) {
+		self.state.cached_child_storage_root(child_info, delta, write_overlay, state_version)
 	}
 
 	fn raw_iter(&self, args: IterArgs) -> Result<Self::RawIter, Self::Error> {

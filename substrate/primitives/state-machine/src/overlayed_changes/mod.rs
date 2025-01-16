@@ -133,6 +133,7 @@ impl<H: Hasher> StorageRootCache<H> {
 pub struct OverlayedChanges<H: Hasher> {
 	/// Top level storage changes.
 	top: OverlayedChangeSet,
+	cached_storage_root: bool,
 	top_root_cache: StorageRootCache<H>,
 	/// Child storage changes. The map key is the child storage key without the common prefix.
 	children: Map<StorageKey, (OverlayedChangeSet, ChildInfo, StorageRootCache<H>)>,
@@ -154,6 +155,7 @@ impl<H: Hasher> Default for OverlayedChanges<H> {
 	fn default() -> Self {
 		Self {
 			top: Default::default(),
+			cached_storage_root: false,
 			top_root_cache: Default::default(),
 			children: Default::default(),
 			offchain: Default::default(),
@@ -169,6 +171,7 @@ impl<H: Hasher> Clone for OverlayedChanges<H> {
 	fn clone(&self) -> Self {
 		Self {
 			top: self.top.clone(),
+			cached_storage_root: false,
 			top_root_cache: self.top_root_cache.clone(),
 			children: self.children.clone(),
 			offchain: self.offchain.clone(),
@@ -712,6 +715,10 @@ impl<H: Hasher> OverlayedChanges<H> {
 	// 	(root, false)
 	// }
 
+	pub fn pre_cached_storage_root(&mut self) {
+		self.cached_storage_root = true;
+	}
+
 	pub fn storage_root<B: Backend<H>>(
 		&mut self,
 		backend: &B,
@@ -724,46 +731,7 @@ impl<H: Hasher> OverlayedChanges<H> {
 			return (cache.transaction_storage_root, true)
 		}
 
-		let mut no_committed_change = true;
-		let top_dirty_keys = {
-			let dk = self.top_root_cache.take_change();
-			if !dk.is_empty() {
-				no_committed_change = false;
-				dk
-			} else {
-				self.top.dirty_keys.last().unwrap_or(&Set::new()).clone()
-			}
-		};
-		let _delta: Vec<_> = top_dirty_keys.into_iter().filter_map(|k| self.top.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
-		let delta = _delta.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])));
-		let top_root_cache = &mut self.top_root_cache.write_overlay;
-
-		let mut _child_delta: Vec<_> = self
-			.children
-			.values_mut()
-			.map(|(overlay_changes, info, root_cache)| {
-				let child_dirty_keys = {
-					let dk = root_cache.take_change();
-					if !dk.is_empty() {
-						no_committed_change = false;
-						dk
-					} else {
-						overlay_changes.dirty_keys.last().unwrap_or(&Set::new()).clone()
-					}
-				};
-				let delta: Vec<_> = child_dirty_keys.into_iter().filter_map(|k| overlay_changes.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
-				(info, &mut root_cache.write_overlay, delta)
-			})
-			.collect();
-
-		let child_delta = _child_delta
-			.iter_mut()
-			.map(|(info, cache, delta1)| {
-				let delta = delta1.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])));
-				(&**info, &mut **cache, delta)
-			});
-
-		let (root, transaction) = if no_committed_change {
+		let (root, transaction) = if !self.cached_storage_root {
 			let delta = self.top.changes_mut().map(|(k, v)| (&k[..], v.value().map(|v| &v[..])));
 			let child_delta = self
 				.children
@@ -772,6 +740,29 @@ impl<H: Hasher> OverlayedChanges<H> {
 	
 			backend.full_storage_root(delta, child_delta, state_version)
 		} else {
+			self.cached_storage_root = false;
+
+			let _delta: Vec<_> = self.top_root_cache.take_change().into_iter().filter_map(|k| self.top.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
+			let delta = _delta.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])));
+			let top_root_cache = &mut self.top_root_cache.write_overlay;
+
+			let mut _child_delta: Vec<_> = self
+				.children
+				.values_mut()
+				.map(|(overlay_changes, info, root_cache)| {
+					let child_dirty_keys = root_cache.take_change();
+					let delta: Vec<_> = child_dirty_keys.into_iter().filter_map(|k| overlay_changes.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
+					(info, &mut root_cache.write_overlay, delta)
+				})
+				.collect();
+
+			let child_delta = _child_delta
+				.iter_mut()
+				.map(|(info, cache, delta1)| {
+					let delta = delta1.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])));
+					(&**info, &mut **cache, delta)
+				});
+
 			backend.cached_full_storage_root((top_root_cache, delta), child_delta, state_version)
 		};
 

@@ -370,7 +370,7 @@ pub trait Backend<H: Hasher>: core::fmt::Debug {
 			let (child_root, empty) =
 				self.cached_child_storage_root(child_info, child_delta, write_overlay, state_version);
 			let prefixed_storage_key = child_info.prefixed_storage_key();
-			txs.consolidate(write_overlay.clone());
+			// txs.consolidate(write_overlay.clone());
 			if empty {
 				child_roots.push((prefixed_storage_key.into_inner(), None));
 			} else {
@@ -385,7 +385,7 @@ pub trait Backend<H: Hasher>: core::fmt::Debug {
 			write_overlay,
 			state_version,
 		);
-		txs.consolidate(write_overlay.clone());
+		// txs.consolidate(write_overlay.clone());
 
 		(root, txs)
 	}

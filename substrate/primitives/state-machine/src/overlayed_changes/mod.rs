@@ -742,25 +742,36 @@ impl<H: Hasher> OverlayedChanges<H> {
 		} else {
 			self.cached_storage_root = false;
 
-			let _delta: Vec<_> = self.top_root_cache.take_change().into_iter().filter_map(|k| self.top.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
-			let delta = _delta.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])));
+			// let _delta: Vec<_> = self.top_root_cache.take_change().into_iter().filter_map(|k| self.top.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
+			// let delta = _delta.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])));
+			let dirty_keys = self.top_root_cache.take_change();
+			let delta = self.top.changes_mut().filter(|(k, _)| dirty_keys.contains::<StorageKey>(k.as_ref())).map(|(k, v)| (&k[..], v.value().map(|v| &v[..])));
 			let top_root_cache = &mut self.top_root_cache.write_overlay;
 
-			let mut _child_delta: Vec<_> = self
+			// let mut _child_delta: Vec<_> = self
+			// 	.children
+			// 	.values_mut()
+			// 	.map(|(overlay_changes, info, root_cache)| {
+			// 		let child_dirty_keys = root_cache.take_change();
+			// 		let delta: Vec<_> = child_dirty_keys.into_iter().filter_map(|k| overlay_changes.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
+			// 		(info, &mut root_cache.write_overlay, delta)
+			// 	})
+			// 	.collect();
+
+			// let child_delta = _child_delta
+			// 	.iter_mut()
+			// 	.map(|(info, cache, delta1)| {
+			// 		let delta = delta1.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])));
+			// 		(&**info, &mut **cache, delta)
+			// 	});
+			
+			let child_delta = self
 				.children
 				.values_mut()
 				.map(|(overlay_changes, info, root_cache)| {
 					let child_dirty_keys = root_cache.take_change();
-					let delta: Vec<_> = child_dirty_keys.into_iter().filter_map(|k| overlay_changes.changes.get_mut(&k).map(|v| (k, v.value().cloned()))).collect();
-					(info, &mut root_cache.write_overlay, delta)
-				})
-				.collect();
-
-			let child_delta = _child_delta
-				.iter_mut()
-				.map(|(info, cache, delta1)| {
-					let delta = delta1.iter().map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])));
-					(&**info, &mut **cache, delta)
+					let delta = overlay_changes.changes_mut().filter(move |(k, _)| child_dirty_keys.contains::<StorageKey>(k.as_ref())).map(|(k, v)| (&k[..], v.value().map(|v| &v[..])));
+					(&*info, &mut root_cache.write_overlay, delta)
 				});
 
 			backend.cached_full_storage_root((top_root_cache, delta), child_delta, state_version)

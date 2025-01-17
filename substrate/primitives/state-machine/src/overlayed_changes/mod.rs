@@ -93,8 +93,8 @@ impl Extrinsics {
 }
 
 pub struct StorageRootCache<H: Hasher> {
-	write_overlay: PrefixedMemoryDB<H>,
-	dirty_keys: Set<StorageKey>,
+	pub write_overlay: PrefixedMemoryDB<H>,
+	pub dirty_keys: Set<StorageKey>,
 }
 
 impl<H: Hasher> Default for StorageRootCache<H> {
@@ -134,7 +134,7 @@ pub struct OverlayedChanges<H: Hasher> {
 	/// Top level storage changes.
 	top: OverlayedChangeSet,
 	cached_storage_root: bool,
-	top_root_cache: StorageRootCache<H>,
+	pub top_root_cache: StorageRootCache<H>,
 	/// Child storage changes. The map key is the child storage key without the common prefix.
 	children: Map<StorageKey, (OverlayedChangeSet, ChildInfo, StorageRootCache<H>)>,
 	/// Offchain related changes.

@@ -1732,7 +1732,7 @@ impl<T: Config> Pallet<T> {
 			old_event_count
 		};
 
-		Events::<T>::append(event);
+		// Events::<T>::append(event);
 
 		for topic in topics {
 			<EventTopics<T>>::append(topic, &(block_number, event_idx));

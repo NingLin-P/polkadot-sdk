@@ -647,10 +647,10 @@ where
 			let res = match state_version {
 				StateVersion::V0 => delta_trie_root::<sp_trie::LayoutV0<H>, _, _, _, _, _>(
 					// FIXME: parent root
-					&mut eph, self.root, delta, recorder, cache,
+					&mut eph, self.root, delta, None, None,
 				),
 				StateVersion::V1 => delta_trie_root::<sp_trie::LayoutV1<H>, _, _, _, _, _>(
-					&mut eph, self.root, delta, recorder, cache,
+					&mut eph, self.root, delta, None, None,
 				),
 			};
 

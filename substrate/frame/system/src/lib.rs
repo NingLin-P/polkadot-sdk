@@ -1950,7 +1950,12 @@ impl<T: Config> Pallet<T> {
 	/// This needs to be used in prior calling [`initialize`](Self::initialize) for each new block
 	/// to clear events from previous block.
 	pub fn reset_events() {
-		let _ = <Events<T>>::clear(u32::max_value(), None);
+		let event_count = Events::<T>::count();
+		for i in 0..event_count {
+			sp_io::storage::clear(&Events::<T>::hashed_key_for(i));
+		}
+		sp_io::storage::clear(&Events::<T>::counter_storage_final_key());
+
 		let _ = <EventTopics<T>>::clear(u32::max_value(), None);
 	}
 

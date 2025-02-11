@@ -37,6 +37,7 @@ use sc_consensus_babe::{self, SlotProportion};
 use sc_network::{
 	event::Event, service::traits::NetworkService, NetworkBackend, NetworkEventStream,
 };
+use node_primitives::{BlockNumber, Hash};
 use sc_network_sync::{strategy::warp::WarpSyncConfig, SyncingService};
 use sc_service::{config::Configuration, error::Error as ServiceError, RpcHandlers, TaskManager};
 use sc_statement_store::Store as StatementStore;
@@ -97,23 +98,34 @@ pub fn fetch_nonce(client: &FullClient, account: sp_core::sr25519::Pair) -> u32 
 		.expect("Fetching account nonce works; qed")
 }
 
-/// Create a transaction using the given `call`.
-///
-/// The transaction will be signed by `sender`. If `nonce` is `None` it will be fetched from the
-/// state of the best block.
-///
-/// Note: Should only be used for tests.
 pub fn create_extrinsic(
 	client: &FullClient,
 	sender: sp_core::sr25519::Pair,
 	function: impl Into<kitchensink_runtime::RuntimeCall>,
 	nonce: Option<u32>,
 ) -> kitchensink_runtime::UncheckedExtrinsic {
-	let function = function.into();
-	let genesis_hash = client.block_hash(0).ok().flatten().expect("Genesis block exists; qed");
 	let best_hash = client.chain_info().best_hash;
 	let best_block = client.chain_info().best_number;
+	let genesis_hash = client.block_hash(0).ok().flatten().expect("Genesis block exists; qed");
 	let nonce = nonce.unwrap_or_else(|| fetch_nonce(client, sender.clone()));
+	create_extrinsic_with(sender, function, nonce, best_block, best_hash, genesis_hash)
+}
+
+/// Create a transaction using the given `call`.
+///
+/// The transaction will be signed by `sender`. If `nonce` is `None` it will be fetched from the
+/// state of the best block.
+///
+/// Note: Should only be used for tests.
+pub fn create_extrinsic_with(
+	sender: sp_core::sr25519::Pair,
+	function: impl Into<kitchensink_runtime::RuntimeCall>,
+	nonce: u32,
+	best_block: BlockNumber,
+	best_hash: Hash,
+	genesis_hash: Hash,
+) -> kitchensink_runtime::UncheckedExtrinsic {
+	let function = function.into();
 
 	let period = kitchensink_runtime::BlockHashCount::get()
 		.checked_next_power_of_two()

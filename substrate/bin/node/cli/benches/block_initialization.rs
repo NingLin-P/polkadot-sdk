@@ -21,14 +21,15 @@ use polkadot_sdk::*;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 
 use kitchensink_runtime::{constants::currency::*, BalancesCall};
-use node_cli::service::{create_extrinsic, FullClient};
+use std::time::Duration;
+use node_cli::service::{create_extrinsic_with, FullClient};
 use polkadot_sdk::sc_service::config::{ExecutorConfiguration, RpcConfiguration};
 use sc_block_builder::{BlockBuilderBuilder, BuiltBlock};
 use sc_consensus::{
 	block_import::{BlockImportParams, ForkChoiceStrategy},
 	BlockImport, StateAction,
 };
-use sc_transaction_pool::TransactionPoolOptions;
+use node_primitives::{BlockNumber, Hash};
 use sc_service::{
 	config::{
 		BlocksPruning, DatabaseSource, KeystoreConfig, NetworkConfiguration, OffchainWorkerConfig,
@@ -46,6 +47,8 @@ use sp_runtime::{
 };
 use staging_node_cli as node_cli;
 use tokio::runtime::Handle;
+use sc_transaction_pool::PoolLimit;
+use sc_service::config::TransactionPoolOptions;
 
 fn new_node(tokio_handle: Handle) -> node_cli::service::NewFullBase {
 	let base_path = BasePath::new_temp_dir().expect("Creates base path");
@@ -127,19 +130,20 @@ fn import_block(client: &FullClient, built: BuiltBlock<node_primitives::Block>) 
 	let mut params = BlockImportParams::new(BlockOrigin::File, built.block.header);
 	params.state_action =
 		StateAction::ApplyChanges(sc_consensus::StorageChanges::Changes(built.storage_changes));
-	params.fork_choice = Some(ForkChoiceStrategy::LongestChain);
+	params.fork_choice = Some(ForkChoiceStrategy::Custom(true));
 	futures::executor::block_on(client.import_block(params))
 		.expect("importing a block doesn't fail");
 }
 
-fn prepare_benchmark(client: &FullClient) -> (usize, Vec<OpaqueExtrinsic>) {
-	const MINIMUM_PERIOD_FOR_BLOCKS: u64 = 1500;
+const MINIMUM_PERIOD_FOR_BLOCKS: u64 = 1500;
+
+fn prepare_benchmark(client: &FullClient, block_number: BlockNumber, block_hash: Hash, genesis_hash: Hash) -> (usize, Vec<OpaqueExtrinsic>) {
 
 	let mut max_transfer_count = 0;
 	let mut extrinsics = Vec::new();
 	let mut block_builder = BlockBuilderBuilder::new(client)
-		.on_parent_block(client.chain_info().best_hash)
-		.with_parent_block_number(client.chain_info().best_number)
+		.on_parent_block(block_hash)
+		.with_parent_block_number(block_number)
 		.build()
 		.unwrap();
 
@@ -154,11 +158,13 @@ fn prepare_benchmark(client: &FullClient) -> (usize, Vec<OpaqueExtrinsic>) {
 
 	// Add as many transfer extrinsics as possible into a single block.
 	for nonce in 0.. {
-		let extrinsic: OpaqueExtrinsic = create_extrinsic(
-			client,
+		let extrinsic: OpaqueExtrinsic = create_extrinsic_with(
 			src.clone(),
 			BalancesCall::transfer_allow_death { dest: dst.clone(), value: 1 * DOLLARS },
-			Some(nonce),
+			nonce,
+			block_number,
+			block_hash,
+			genesis_hash,
 		)
 		.into();
 
@@ -177,7 +183,7 @@ fn prepare_benchmark(client: &FullClient) -> (usize, Vec<OpaqueExtrinsic>) {
 	(max_transfer_count, extrinsics)
 }
 
-fn block_production(c: &mut Criterion) {
+fn block_initialization(c: &mut Criterion) {
 	sp_tracing::try_init_simple();
 
 	let runtime = tokio::runtime::Runtime::new().expect("creating tokio runtime doesn't fail; qed");
@@ -196,10 +202,23 @@ fn block_production(c: &mut Criterion) {
 	block_builder.push(extrinsic_set_time(1)).unwrap();
 	import_block(client, block_builder.build().unwrap());
 
-	let (max_transfer_count, extrinsics) = prepare_benchmark(&client);
+	let chain = client.chain_info();
+	let genesis_hash = chain.genesis_hash;
+	let best_hash = chain.best_hash;
+	let best_number = chain.best_number;
+	let (max_transfer_count, extrinsics) = prepare_benchmark(&client, best_number, best_hash, genesis_hash);
 	log::info!("Maximum transfer count: {}", max_transfer_count);
+	let mut block_builder = BlockBuilderBuilder::new(client)
+		.on_parent_block(best_hash)
+		.with_parent_block_number(best_number)
+		.build()
+		.unwrap();
+	for extrinsic in extrinsics {
+		block_builder.push(extrinsic).unwrap();
+	}
+	import_block(client, block_builder.build().unwrap());
 
-	let mut group = c.benchmark_group("Block production");
+	let mut group = c.benchmark_group("Block initialization");
 
 	group.sample_size(10);
 	group.throughput(Throughput::Elements(max_transfer_count as u64));
@@ -208,42 +227,22 @@ fn block_production(c: &mut Criterion) {
 	let best_hash = chain.best_hash;
 	let best_number = chain.best_number;
 
-	group.bench_function(format!("{} transfers (no proof)", max_transfer_count), |b| {
+	group.bench_function(format!("Events of {} transfers", max_transfer_count), |b| {
 		b.iter_batched(
-			|| extrinsics.clone(),
-			|extrinsics| {
+			|| {},
+			|_| {
 				let mut block_builder = BlockBuilderBuilder::new(client)
 					.on_parent_block(best_hash)
 					.with_parent_block_number(best_number)
 					.build()
 					.unwrap();
-				for extrinsic in extrinsics {
-					block_builder.push(extrinsic).unwrap();
-				}
-				block_builder.build().unwrap()
-			},
-			BatchSize::SmallInput,
-		)
-	});
-
-	group.bench_function(format!("{} transfers (with proof)", max_transfer_count), |b| {
-		b.iter_batched(
-			|| extrinsics.clone(),
-			|extrinsics| {
-				let mut block_builder = BlockBuilderBuilder::new(client)
-					.on_parent_block(best_hash)
-					.with_parent_block_number(best_number)
-					.build()
-					.unwrap();
-				for extrinsic in extrinsics {
-					block_builder.push(extrinsic).unwrap();
-				}
-				block_builder.build().unwrap()
+				block_builder.push(extrinsic_set_time(1 + 2 * MINIMUM_PERIOD_FOR_BLOCKS)).unwrap();
+				import_block(client, block_builder.build().unwrap());
 			},
 			BatchSize::SmallInput,
 		)
 	});
 }
 
-criterion_group!(benches, block_production);
+criterion_group!(benches, block_initialization);
 criterion_main!(benches);

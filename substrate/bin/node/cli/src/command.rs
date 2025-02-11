@@ -31,6 +31,24 @@ use sc_cli::{Result, SubstrateCli};
 use sc_service::PartialComponents;
 use sp_keyring::Sr25519Keyring;
 use sp_runtime::traits::HashingFor;
+use sc_consensus::{
+	block_import::{BlockImportParams, ForkChoiceStrategy},
+	BlockImport, StateAction,
+};
+use sp_consensus::BlockOrigin;
+use sc_block_builder::{BlockBuilderBuilder, BuiltBlock};
+use crate::service::{create_extrinsic_with};
+use kitchensink_runtime::{constants::currency::*, BalancesCall};
+use sp_runtime::{
+	generic,
+	transaction_validity::{InvalidTransaction, TransactionValidityError},
+	AccountId32, MultiAddress, OpaqueExtrinsic,
+};
+use sp_blockchain::HeaderBackend;
+use sp_api::ProvideRuntimeApi;
+use sp_api::CallApiAt;
+use sp_api::ApiExt;
+use sc_block_builder::BlockBuilderApi;
 
 use std::sync::Arc;
 
@@ -228,5 +246,102 @@ pub fn run() -> Result<()> {
 			let runner = cli.create_runner(cmd)?;
 			runner.sync_run(|config| cmd.run::<Block>(&config))
 		},
+		Some(Subcommand::BenchmarkBlockExecution(cmd)) => {
+			let runner = cli.create_runner(cmd)?;
+			runner.sync_run(|mut config| {
+				let PartialComponents { client, task_manager, import_queue, .. } =
+					new_partial(&config, None)?;
+				run_block_execution(cmd, client);
+				Ok(())
+			})
+		},
 	}
+}
+
+const MINIMUM_PERIOD_FOR_BLOCKS: u64 = 1500;
+
+	pub fn run_block_execution<C>(cmd: &crate::BlockExecutionCmd, client: Arc<C>)
+	where
+		C: sc_consensus::BlockImport<Block>,
+		C: HeaderBackend<Block>
+			+ ProvideRuntimeApi<Block>
+			+ CallApiAt<Block>
+			+ Send
+			+ Sync
+			+ 'static,
+		C::Api: ApiExt<Block> + BlockBuilderApi<Block> + 'static,
+	{
+		let genesis_hash = client.info().genesis_hash;
+		let block_hash = client.info().best_hash;
+		let block_number = client.info().best_number;
+
+		// Creating those is surprisingly costly, so let's only do it once and later just `clone` them.
+		let src = Sr25519Keyring::Alice.pair();
+		let dst: MultiAddress<AccountId32, u32> = Sr25519Keyring::Bob.to_account_id().into();
+
+		// Add as many transfer extrinsics as possible into a single block.
+		let mut extrinsics = vec![extrinsic_set_time(1)];
+		for nonce in 0..cmd.number {
+			extrinsics.push(
+				create_extrinsic_with(
+					src.clone(),
+					BalancesCall::transfer_allow_death { dest: dst.clone(), value: 1 * DOLLARS },
+					nonce as u32,
+					block_number,
+					block_hash,
+					genesis_hash,
+				)
+				.into()
+			);
+		}
+
+		let start = std::time::Instant::now();
+		let mut block_builder = BlockBuilderBuilder::new(client.as_ref())
+			.on_parent_block(block_hash)
+			.with_parent_block_number(block_number)
+			.build()
+			.unwrap();
+		let mut took = start.elapsed().as_millis();
+		println!("Initialized block of {} transfers took {}ms", cmd.number, took);
+		for tx in extrinsics {
+			block_builder.push(tx).unwrap();
+		}
+		took = start.elapsed().as_millis() - took;
+		println!("Executed block of {} transfers took {}ms", cmd.number, took);
+		let block = block_builder.build().unwrap();
+		took = start.elapsed().as_millis() - took;
+		println!("Finalized block of {} transfers took {}ms", cmd.number, took);
+		import_block(&client, block);
+		took = start.elapsed().as_millis() - took;
+		println!("Imported block of {} transfers took {}ms", cmd.number, took);
+
+		let block_hash = client.info().best_hash;
+		let block_number = client.info().best_number;
+		let start = std::time::Instant::now();
+		let mut block_builder = BlockBuilderBuilder::new(client.as_ref())
+			.on_parent_block(block_hash)
+			.with_parent_block_number(block_number)
+			.build()
+			.unwrap();
+		block_builder.push(extrinsic_set_time(1 + MINIMUM_PERIOD_FOR_BLOCKS)).unwrap();
+		import_block(&client, block_builder.build().unwrap());
+		println!("The next block of {} transfers took {}ms", cmd.number, start.elapsed().as_millis());
+	}
+
+
+fn extrinsic_set_time(now: u64) -> OpaqueExtrinsic {
+	let utx: kitchensink_runtime::UncheckedExtrinsic = generic::UncheckedExtrinsic::new_bare(
+		kitchensink_runtime::RuntimeCall::Timestamp(pallet_timestamp::Call::set { now }),
+	)
+	.into();
+	utx.into()
+}
+
+fn import_block<C: sc_consensus::BlockImport<Block>>(client: &Arc<C>, built: BuiltBlock<Block>) {
+	let mut params = BlockImportParams::new(BlockOrigin::File, built.block.header);
+	params.state_action =
+		StateAction::ApplyChanges(sc_consensus::StorageChanges::Changes(built.storage_changes));
+	params.fork_choice = Some(ForkChoiceStrategy::Custom(true));
+	futures::executor::block_on(client.import_block(params))
+		.expect("importing a block doesn't fail");
 }

@@ -194,3 +194,7 @@ harness = false
 [[bench]]
 name = "executor"
 harness = false
+
+[[bench]]
+name = "block_initialization"
+harness = false

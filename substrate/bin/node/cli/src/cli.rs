@@ -100,4 +100,31 @@ pub enum Subcommand {
 
 	/// Db meta columns information.
 	ChainInfo(sc_cli::ChainInfoCmd),
+
+	BenchmarkBlockExecution(BlockExecutionCmd),
+}
+
+#[derive(Debug, Clone, clap::Parser)]
+pub struct BlockExecutionCmd {
+	/// Shared parameters
+	#[command(flatten)]
+	pub shared_params: sc_cli::SharedParams,
+
+	#[allow(missing_docs)]
+	#[command(flatten)]
+	pub pruning_params: sc_cli::PruningParams,
+
+	// The total number of tx in the block
+	#[clap(long)]
+	pub number: usize,
+}
+
+impl sc_cli::CliConfiguration for BlockExecutionCmd {
+	fn shared_params(&self) -> &sc_cli::SharedParams {
+		&self.shared_params
+	}
+
+	fn pruning_params(&self) -> Option<&sc_cli::PruningParams> {
+		Some(&self.pruning_params)
+	}
 }

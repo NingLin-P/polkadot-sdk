@@ -277,6 +277,8 @@ pub struct DispatchEventInfo {
 	pub pays_fee: Pays,
 }
 
+pub const EVENT_SEGMENT_SIZE: u32 = 100;
+
 #[frame_support::pallet]
 pub mod pallet {
 	use crate::{self as frame_system, pallet_prelude::*, *};
@@ -991,7 +993,13 @@ pub mod pallet {
 	#[pallet::disable_try_decode_storage]
 	#[pallet::unbounded]
 	pub(super) type Events<T: Config> =
-		CountedStorageMap<_, Identity, u32, Box<EventRecord<T::RuntimeEvent, T::Hash>>, OptionQuery>;
+		StorageMap<_, Identity, u32, Vec<Box<EventRecord<T::RuntimeEvent, T::Hash>>>, OptionQuery>;
+
+	/// The number of events in the `Events<T>` list.
+	#[pallet::storage]
+	#[pallet::whitelist_storage]
+	#[pallet::getter(fn event_count)]
+	pub(super) type EventCount<T: Config> = StorageValue<_, EventIndex, ValueQuery>;
 
 	/// Mapping between a topic (represented by T::Hash) and a vector of indexes
 	/// of events in the `<Events<T>>` list.
@@ -1749,9 +1757,21 @@ impl<T: Config> Pallet<T> {
 
 		let phase = ExecutionPhase::<T>::get().unwrap_or_default();
 		let event = EventRecord { phase, event, topics: topics.to_vec() };
-		let event_idx = Events::<T>::count();
-
-		Events::<T>::insert(event_idx, event);
+		// Index of the event to be added.
+		let event_idx = {
+			let old_event_count = EventCount::<T>::get();
+			let new_event_count = match old_event_count.checked_add(1) {
+				// We've reached the maximum number of events at this block, just
+				// don't do anything and leave the event_count unaltered.
+				None => return,
+				Some(nc) => nc,
+			};
+			EventCount::<T>::put(new_event_count);
+			old_event_count
+		};
+	
+		let event_segment_idx = event_idx / EVENT_SEGMENT_SIZE;
+		Events::<T>::append(event_segment_idx, event);
 
 		for topic in topics {
 			<EventTopics<T>>::append(topic, &(block_number, event_idx));
@@ -1936,8 +1956,8 @@ impl<T: Config> Pallet<T> {
 	/// execution else it can have a large impact on the PoV size of a block.
 	pub fn read_events_no_consensus(
 	) -> impl Iterator<Item = Box<EventRecord<T::RuntimeEvent, T::Hash>>> {
-		let event_count = Events::<T>::count();
-		(0..event_count).filter_map(|i| Events::<T>::get(i))
+		let event_count = EventCount::<T>::get() / EVENT_SEGMENT_SIZE;
+		(0..event_count).filter_map(|i| Events::<T>::get(i)).flatten()
 	}
 
 	/// Read and return the events of a specific pallet, as denoted by `E`.
@@ -1948,9 +1968,10 @@ impl<T: Config> Pallet<T> {
 	where
 		T::RuntimeEvent: TryInto<E>,
 	{
-		let event_count = Events::<T>::count();
+		let event_count = EventCount::<T>::get() / EVENT_SEGMENT_SIZE;
 		(0..event_count)
 			.filter_map(|i| Events::<T>::get(i))
+			.flatten()
 			.map(|er| er.event)
 			.filter_map(|e| e.try_into().ok())
 			.collect::<_>()
@@ -2035,13 +2056,15 @@ impl<T: Config> Pallet<T> {
 	/// This needs to be used in prior calling [`initialize`](Self::initialize) for each new block
 	/// to clear events from previous block.
 	pub fn reset_events() {
-		let event_count = Events::<T>::count();
+		let event_count = EventCount::<T>::get();
 		for i in 0..event_count {
 			sp_io::storage::clear(&Events::<T>::hashed_key_for(i));
 		}
-		sp_io::storage::clear(&Events::<T>::counter_storage_final_key());
+		EventCount::<T>::kill();
 
 		let _ = <EventTopics<T>>::clear(u32::max_value(), None);
+
+		log::info!("Frame system reset_events, event_count {event_count:?}");
 	}
 
 	/// Assert the given `event` exists.
@@ -2057,7 +2080,7 @@ impl<T: Config> Pallet<T> {
 		};
 
 		assert!(
-			Events::<T>::iter_values().any(|record| record.event == event),
+			Events::<T>::iter_values().flatten().any(|record| record.event == event),
 			"{warn}expected event {event:?} not found",
 		);
 	}
@@ -2074,8 +2097,9 @@ impl<T: Config> Pallet<T> {
 			""
 		};
 
-		let last_event_index = Events::<T>::count().checked_sub(1).expect(&alloc::format!("events expected"));
-		let last_event = Events::<T>::get(last_event_index).expect(&alloc::format!("event exists")).event.clone();
+		let last_event_index = EventCount::<T>::get() / EVENT_SEGMENT_SIZE;
+		let mut last_event_segment = Events::<T>::get(last_event_index).expect(&alloc::format!("event exists"));
+		let last_event = last_event_segment.last_mut().expect(&alloc::format!("events expected")).event.clone();
 		assert_eq!(
 			last_event, event,
 			"{warn}expected event {event:?} is not equal to the last event {last_event:?}",

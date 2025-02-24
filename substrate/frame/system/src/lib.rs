@@ -995,11 +995,16 @@ pub mod pallet {
 	pub(super) type Events<T: Config> =
 		StorageMap<_, Identity, u32, Vec<Box<EventRecord<T::RuntimeEvent, T::Hash>>>, OptionQuery>;
 
-	/// The number of events in the `Events<T>` list.
+	/// The number of events in the `Events<T>` map.
 	#[pallet::storage]
 	#[pallet::whitelist_storage]
 	#[pallet::getter(fn event_count)]
 	pub(super) type EventCount<T: Config> = StorageValue<_, EventIndex, ValueQuery>;
+
+	/// The total number of uncleared events from the previous blocks.
+	#[pallet::storage]
+	#[pallet::getter(fn uncleared_event_count)]
+	pub(super) type UnclearedEventCount<T: Config> = StorageValue<_, EventIndex, ValueQuery>;
 
 	/// Mapping between a topic (represented by T::Hash) and a vector of indexes
 	/// of events in the `<Events<T>>` list.
@@ -2056,10 +2061,10 @@ impl<T: Config> Pallet<T> {
 	/// This needs to be used in prior calling [`initialize`](Self::initialize) for each new block
 	/// to clear events from previous block.
 	pub fn reset_events() {
+		let pre_uncleared_event_count = UnclearedEventCount::<T>::get();
 		let event_count = EventCount::<T>::get();
-		for i in 0..event_count {
-			sp_io::storage::clear(&Events::<T>::hashed_key_for(i));
-		}
+
+		UnclearedEventCount::<T>::set(pre_uncleared_event_count.max(event_count));
 		EventCount::<T>::kill();
 
 		let _ = <EventTopics<T>>::clear(u32::max_value(), None);
